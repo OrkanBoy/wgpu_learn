@@ -1,6 +1,6 @@
-use std::arch::x86_64::_rdrand16_step;
-
-use wgpu::{Extent3d, SurfaceError, util::DeviceExt};
+use bytemuck::offset_of;
+use wgpu::*;
+use wgpu::{Extent3d, util::DeviceExt};
 
 fn main() {
     env_logger::init();
@@ -216,13 +216,13 @@ async fn run() {
         label: Some("sprite buffer"),
         contents: bytemuck::cast_slice(&[
             Vertex {
-                position: [0.01, 0.0],
+                position: [0.02, 0.0],
             },
             Vertex {
-                position: [-0.005, -0.005],
+                position: [-0.01, -0.01],
             },
             Vertex {
-                position: [-0.005, 0.005],
+                position: [-0.01, 0.01],
             },
         ]),
         usage: wgpu::BufferUsages::VERTEX,
@@ -254,7 +254,7 @@ async fn run() {
         let mut rng = rand::thread_rng();
         let init_boids = (0..BOIDS).map(|_| Boid {
             position: [rng.gen::<f32>() * 2.0 - 1.0, rng.gen::<f32>() * 2.0 - 1.0],
-            velocity: [rng.gen::<f32>(), rng.gen::<f32>()],
+            velocity: [rng.gen::<f32>() - 0.5, rng.gen::<f32>() - 0.5],
         }).collect::<Vec<_>>();
 
         boid_buffer
@@ -263,7 +263,6 @@ async fn run() {
             .copy_from_slice(bytemuck::cast_slice(&init_boids));
     }
     boid_buffer.unmap();
-
     let sim_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("simulation parameters buffer"),
         contents: bytemuck::cast_slice(&[
@@ -271,12 +270,13 @@ async fn run() {
                 dt: 0.015,
                 rule1d_sqr: 0.1 * 0.1,
                 rule2d_sqr: 0.1 * 0.1,
-                rule1s: 0.1,
-                rule2s: 0.1,
+                rule1s: 0.7,
+                rule2s: 0.0,
             }
         ]),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
+    
 
     let render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("camera bind group"),
@@ -314,13 +314,42 @@ async fn run() {
         ],
     });
 
+    let sim_speed = 1.0;
+    let delta_frame_time_cap = 1.0 / 300.0;
+    let instant = std::time::Instant::now();
+    let mut last_frame_time = 0.0;
+    let mut delta_frame_time = 0.0;
+    let mut frames = 0;
     let mut dynamic_offsets = [0, aligned_boid_buffer_size as wgpu::DynamicOffset];
     let mut write_to_other_boid_buffer = true;
+
     event_loop.run(move |event: event::Event<'_, ()>, _, control_flow| {
         use winit::{event_loop::*, event::*};
 
         match event {
             Event::RedrawRequested(..) => {
+                frames += 1;
+                let frame_time = instant.elapsed().as_secs_f32();
+                delta_frame_time = frame_time - last_frame_time;
+                last_frame_time = frame_time;
+
+                let time_left = delta_frame_time_cap - delta_frame_time;
+                if time_left > 0.0 {
+                    std::thread::sleep(std::time::Duration::from_secs_f32(time_left));
+                }
+
+                window.set_title(&format!("fps: {}, average fps: {}", 
+                    (1.0 / delta_frame_time) as u32,
+                    (frames as f32 / frame_time) as u32,
+                ));
+
+                // perhaps need to synchronize so this write happens before simulation
+                queue.write_buffer(
+                    &sim_params_buffer, 
+                    0,
+                    bytemuck::cast_slice(&[delta_frame_time * sim_speed]), 
+                );
+
                 let output = surface.get_current_texture().unwrap();
                 let output_view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
                 let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -426,8 +455,10 @@ async fn run() {
                 }
                 _ => {}
             }
-            Event::MainEventsCleared => {
+            Event::MainEventsCleared => {     
                 if config.width > 0 && config.height > 0 {
+                    
+
                     window.request_redraw();
                 }
             }

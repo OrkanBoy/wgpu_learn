@@ -11,6 +11,5 @@ env_logger = "*"
 log = "*"
 wgpu = "*"
 pollster = "*"
-instant = "*"
 bytemuck = { version = "*", features = ["derive"] }
 rand = "*"

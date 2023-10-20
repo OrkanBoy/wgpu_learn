@@ -45,9 +45,9 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
             c_pos += other_boid.position;
             c_pos_count += 1;
         }
-        if dst_sqr < sim_params.rule2d_sqr {
-            c_vel += other_boid.velocity;
-            c_pos_count += 1;
+        if dst_sqr < sim_params.rule2d_sqr && dst_sqr > 0.0 {
+            c_vel += other_boid.velocity / dst_sqr;
+            c_vel_count += 1;
         }
     }
     if c_pos_count != 0 {
@@ -60,8 +60,6 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
     boid.velocity += 
         (c_pos - boid.position) * sim_params.rule1s +
         c_vel * sim_params.rule2s;
-
-    boid.velocity = normalize(boid.velocity);
 
     boid.position += boid.velocity * sim_params.dt;
 

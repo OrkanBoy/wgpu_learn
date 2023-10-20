@@ -1,3 +1,5 @@
+use std::arch::x86_64::_rdrand16_step;
+
 use wgpu::{Extent3d, SurfaceError, util::DeviceExt};
 
 fn main() {
@@ -14,8 +16,8 @@ struct Vertex {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
 struct Boid {
-    velocity: [f32; 2],
     position: [f32; 2],
+    velocity: [f32; 2],
 }
 
 #[repr(C)]
@@ -34,7 +36,7 @@ struct SimParams {
     rule2s: f32,
 }
 
-const BOIDS: u32 = 100;
+const BOIDS: u32 = 400;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const VERTEX_ATTRIBS: &[wgpu::VertexAttribute] = &wgpu::vertex_attr_array![0 => Float32x2];
 const BOID_ATTRIBS: &[wgpu::VertexAttribute] = &wgpu::vertex_attr_array![1 => Float32x2, 2 => Float32x2];
@@ -145,7 +147,7 @@ async fn run() {
         depth_stencil: Some(wgpu::DepthStencilState {
             format: DEPTH_FORMAT,
             depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::Greater, // 1.
+            depth_compare: wgpu::CompareFunction::Less, // 1.
             stencil: wgpu::StencilState::default(), // 2.
             bias: wgpu::DepthBiasState::default(),
         }), // 1.
@@ -169,7 +171,7 @@ async fn run() {
                 binding: 0,
                 visibility: wgpu::ShaderStages::COMPUTE,
                 ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
                     has_dynamic_offset: true,
                     min_binding_size: None,
                 },
@@ -214,26 +216,28 @@ async fn run() {
         label: Some("sprite buffer"),
         contents: bytemuck::cast_slice(&[
             Vertex {
-                position: [0.05, -0.05],
+                position: [0.01, 0.0],
             },
             Vertex {
-                position: [-0.05, -0.05],
+                position: [-0.005, -0.005],
             },
             Vertex {
-                position: [-0.05, 0.05],
+                position: [-0.005, 0.005],
             },
         ]),
         usage: wgpu::BufferUsages::VERTEX,
     });
 
-    let mut aspect_ratio = size.width as f32 / size.width as f32;
-    let camera_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+    let mut aspect_ratio = size.width as f32 / size.height as f32;
+    let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("camera buffer"),
-        size: std::mem::size_of::<Camera>() as wgpu::BufferAddress,
+        contents: bytemuck::cast_slice(&[
+            Camera {
+                aspect_ratio,
+            }
+        ]),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
     });
-
     
     const BOID_BUFFER_SIZE: wgpu::BufferAddress = 
         (BOIDS as wgpu::BufferAddress) * (std::mem::size_of::<Boid>() as wgpu::BufferAddress);
@@ -243,14 +247,35 @@ async fn run() {
         label: Some("2 boid position and velocity buffers"),
         size: 2 * aligned_boid_buffer_size,
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::STORAGE,
-        mapped_at_creation: false,
+        mapped_at_creation: true,
     });
+    {   
+        use rand::prelude::*;
+        let mut rng = rand::thread_rng();
+        let init_boids = (0..BOIDS).map(|_| Boid {
+            position: [rng.gen::<f32>() * 2.0 - 1.0, rng.gen::<f32>() * 2.0 - 1.0],
+            velocity: [rng.gen::<f32>(), rng.gen::<f32>()],
+        }).collect::<Vec<_>>();
 
-    let sim_params_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        boid_buffer
+            .slice(..BOID_BUFFER_SIZE)
+            .get_mapped_range_mut()
+            .copy_from_slice(bytemuck::cast_slice(&init_boids));
+    }
+    boid_buffer.unmap();
+
+    let sim_params_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("simulation parameters buffer"),
-        size: std::mem::size_of::<SimParams>() as wgpu::BufferAddress,
+        contents: bytemuck::cast_slice(&[
+            SimParams {
+                dt: 0.015,
+                rule1d_sqr: 0.1 * 0.1,
+                rule2d_sqr: 0.1 * 0.1,
+                rule1s: 0.1,
+                rule2s: 0.1,
+            }
+        ]),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
     });
 
     let render_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -290,20 +315,12 @@ async fn run() {
     });
 
     let mut dynamic_offsets = [0, aligned_boid_buffer_size as wgpu::DynamicOffset];
-    let mut other_boid_buffer_turn = false;
-    event_loop.run(move |event, _, control_flow| {
+    let mut write_to_other_boid_buffer = true;
+    event_loop.run(move |event: event::Event<'_, ()>, _, control_flow| {
         use winit::{event_loop::*, event::*};
 
         match event {
             Event::RedrawRequested(..) => {
-                queue.write_buffer(
-                    &camera_buffer, 
-                    0, 
-                    bytemuck::cast_slice(&[Camera {
-                        aspect_ratio,
-                    }])
-                );
-
                 let output = surface.get_current_texture().unwrap();
                 let output_view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
                 let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -317,8 +334,8 @@ async fn run() {
 
                     compute_pass.set_pipeline(&compute_pipeline);
                     compute_pass.set_bind_group(
-                        0, 
-                        &compute_bind_group, 
+                        0,
+                        &compute_bind_group,
                         &dynamic_offsets,
                     );
 
@@ -355,7 +372,7 @@ async fn run() {
                         depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                             view: &depth_texture_view,
                             depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Clear(0.0),
+                                load: wgpu::LoadOp::Clear(1.0),
                                 store: true,
                             }),
                             stencil_ops: None,
@@ -365,12 +382,27 @@ async fn run() {
                     render_pass.set_pipeline(&render_pipeline);
                     render_pass.set_bind_group(0, &render_bind_group, &[]);
                     render_pass.set_vertex_buffer(0, sprite_buffer.slice(..));
+                    render_pass.set_vertex_buffer(1, boid_buffer.slice(
+                        if write_to_other_boid_buffer {
+                            0..BOID_BUFFER_SIZE
+                        } else {
+                            aligned_boid_buffer_size..aligned_boid_buffer_size + BOID_BUFFER_SIZE
+                        }
+                    ));
 
                     render_pass.draw(0..3, 0..BOIDS);
                 }
 
                 queue.submit(std::iter::once(encoder.finish()));
                 output.present();
+
+                // swap dynamic offsets of compute bind groups
+                {
+                    let tmp = dynamic_offsets[0];
+                    dynamic_offsets[0] = dynamic_offsets[1];
+                    dynamic_offsets[1] = tmp;
+                }
+                write_to_other_boid_buffer = !write_to_other_boid_buffer;
             }
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
@@ -381,19 +413,21 @@ async fn run() {
                         surface.configure(&device, &config);
                         (depth_texture, depth_texture_view) = create_depth_texture(&device, size.width, size.height);
                         aspect_ratio = size.width as f32 / size.height as f32;
+                        queue.write_buffer(
+                            &camera_buffer, 
+                            0,
+                            bytemuck::cast_slice(&[
+                                Camera {
+                                    aspect_ratio,
+                                }
+                            ]) 
+                        );
                     }
                 }
                 _ => {}
             }
             Event::MainEventsCleared => {
                 if config.width > 0 && config.height > 0 {
-                    other_boid_buffer_turn = !other_boid_buffer_turn;
-                    // swap dynamic offsets of compute bind groups
-                    {
-                        let tmp = dynamic_offsets[0];
-                        dynamic_offsets[0] = dynamic_offsets[1];
-                        dynamic_offsets[1] = tmp;
-                    }
                     window.request_redraw();
                 }
             }

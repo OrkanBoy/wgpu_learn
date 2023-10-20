@@ -11,7 +11,10 @@ struct Boid {
     velocity: vec2<f32>,
 }
 
-// boids_now should be read but they are both from same buffer, and the buffer can only have one use
+// boids_now should be read but error appears
+// BufferUses(STORAGE_READ_WRITE) is an exclusive
+// usage and cannot be used with any other usages
+// within the usage scope (renderpass or compute dispatch).
 @group(0) @binding(0) var<storage, read_write> boids_now: array<Boid>;
 @group(0) @binding(1) var<storage, read_write> boids_next: array<Boid>;
 @group(0) @binding(2) var<uniform> sim_params: SimParams;
@@ -58,7 +61,21 @@ fn main(@builtin(global_invocation_id) global_invocation_id: vec3<u32>) {
         (c_pos - boid.position) * sim_params.rule1s +
         c_vel * sim_params.rule2s;
 
+    boid.velocity = normalize(boid.velocity);
+
     boid.position += boid.velocity * sim_params.dt;
+
+    if boid.position.x > 1.0 {
+        boid.position.x = -1.0;
+    } else if boid.position.x < -1.0 {
+        boid.position.x = 1.0;
+    }
+
+    if boid.position.y > 1.0 {
+        boid.position.y = -1.0;
+    } else if boid.position.y < -1.0 {
+        boid.position.y = 1.0;
+    }
     
     boids_next[index] = boid;
     return;

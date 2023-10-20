@@ -17,19 +17,21 @@ fn vs_main(
     @location(2) boid_velocity: vec2<f32>,
 ) -> VertexOut {
     var out: VertexOut;
-    out.position = vec4<f32>(vertex_position, 0.0, 1.0);
     let orientation = normalize(boid_velocity);
     out.position.x = 
         orientation.x * vertex_position.x - orientation.y * vertex_position.y;
     out.position.y = 
-        orientation.y * vertex_position.y + orientation.x * vertex_position.y;
+        orientation.y * vertex_position.x + orientation.x * vertex_position.y;
     out.position.x += boid_position.x;
     out.position.y += boid_position.y;
 
-    // todo: make tip vertex different color
-    out.color = vec3<f32>(orientation.x, 0.0, orientation.y);
 
-    // out.position.w = out.position.z;
+    // todo: make tip vertex different color
+    // todo: color hue by rotation around (r: 1, g: 1, b:1)
+    out.color = vec3<f32>(orientation.x * orientation.x, 0.0, orientation.y * orientation.y);
+
+    out.position.z = 0.0;
+    out.position.w = 1.0;
     out.position.y *= -1.0;
     out.position.y *= camera.aspect_ratio;
     return out;

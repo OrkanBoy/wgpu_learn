@@ -13,3 +13,4 @@ wgpu = "*"
 pollster = "*"
 instant = "*"
 bytemuck = { version = "*", features = ["derive"] }
+rand = "*"

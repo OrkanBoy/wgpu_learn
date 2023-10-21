@@ -1,6 +1,9 @@
+use std::time::Instant;
+
 use bytemuck::offset_of;
 use wgpu::*;
 use wgpu::{Extent3d, util::DeviceExt};
+mod input;
 
 fn main() {
     env_logger::init();
@@ -30,13 +33,15 @@ struct Camera {
 #[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
 struct SimParams {
     dt: f32,
-    rule1d_sqr: f32,
-    rule2d_sqr: f32,
-    rule1s: f32,
-    rule2s: f32,
+    rule1_d2: f32,
+    rule2_d2: f32,
+    rule3_d2: f32,
+    rule1_w: f32,
+    rule2_w: f32,
+    rule3_w: f32,
 }
 
-const BOIDS: u32 = 400;
+const BOIDS: u32 = 1000;
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const VERTEX_ATTRIBS: &[wgpu::VertexAttribute] = &wgpu::vertex_attr_array![0 => Float32x2];
 const BOID_ATTRIBS: &[wgpu::VertexAttribute] = &wgpu::vertex_attr_array![1 => Float32x2, 2 => Float32x2];
@@ -267,11 +272,13 @@ async fn run() {
         label: Some("simulation parameters buffer"),
         contents: bytemuck::cast_slice(&[
             SimParams {
-                dt: 0.015,
-                rule1d_sqr: 0.1 * 0.1,
-                rule2d_sqr: 0.1 * 0.1,
-                rule1s: 0.7,
-                rule2s: 0.0,
+                dt: 0.01,
+                rule1_d2: 0.1 * 0.1,
+                rule2_d2: 0.025 * 0.025,
+                rule3_d2: 0.025 * 0.025,
+                rule1_w: 0.05,
+                rule2_w: 0.2,
+                rule3_w: 0.01,
             }
         ]),
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -314,40 +321,60 @@ async fn run() {
         ],
     });
 
-    let sim_speed = 1.0;
-    let delta_frame_time_cap = 1.0 / 300.0;
     let instant = std::time::Instant::now();
-    let mut last_frame_time = 0.0;
+    let mut last_frame_time = instant.elapsed().as_secs_f32();
     let mut delta_frame_time = 0.0;
+    let mut time_rendered = 0.0;
     let mut frames = 0;
+
+    let sim_speed = 1.0;
+    let mut rule1_d = 0.1;
+    let mut rule2_d = 0.025;
+    let mut rule3_d = 0.025;
+    let mut rule1_w = 0.05;
+    let mut rule2_w = 0.5;
+    let mut rule3_w = 0.2;
     let mut dynamic_offsets = [0, aligned_boid_buffer_size as wgpu::DynamicOffset];
     let mut write_to_other_boid_buffer = true;
 
+    let mut input = input::InputState::new();
+    
     event_loop.run(move |event: event::Event<'_, ()>, _, control_flow| {
         use winit::{event_loop::*, event::*};
 
         match event {
             Event::RedrawRequested(..) => {
+                if config.width == 0 || config.height == 0 {
+                    return;
+                }
+
                 frames += 1;
                 let frame_time = instant.elapsed().as_secs_f32();
                 delta_frame_time = frame_time - last_frame_time;
                 last_frame_time = frame_time;
+                time_rendered += delta_frame_time;
 
-                let time_left = delta_frame_time_cap - delta_frame_time;
-                if time_left > 0.0 {
-                    std::thread::sleep(std::time::Duration::from_secs_f32(time_left));
-                }
-
-                window.set_title(&format!("fps: {}, average fps: {}", 
+                window.set_title(&format!("fps: {}, average fps: {}, time rendered: {}", 
                     (1.0 / delta_frame_time) as u32,
-                    (frames as f32 / frame_time) as u32,
+                    (frames as f32 / time_rendered) as u32,
+                    time_rendered,
                 ));
 
                 // perhaps need to synchronize so this write happens before simulation
                 queue.write_buffer(
                     &sim_params_buffer, 
                     0,
-                    bytemuck::cast_slice(&[delta_frame_time * sim_speed]), 
+                    bytemuck::cast_slice(&[
+                        SimParams {
+                            dt: delta_frame_time * sim_speed,
+                            rule1_d2: rule1_d * rule1_d,
+                            rule2_d2: rule2_d * rule2_d,
+                            rule3_d2: rule3_d * rule3_d,
+                            rule1_w,
+                            rule2_w,
+                            rule3_w,
+                        }
+                    ]), 
                 );
 
                 let output = surface.get_current_texture().unwrap();
@@ -369,12 +396,13 @@ async fn run() {
                     );
 
                     const WORK_GROUP_SIZE: u32 = 64;
+                    const WORK_GROUPS: u32 = if BOIDS % WORK_GROUP_SIZE == 0 { 
+                        BOIDS / WORK_GROUP_SIZE
+                    } else {
+                        BOIDS / WORK_GROUP_SIZE + 1
+                    };
                     compute_pass.dispatch_workgroups(
-                        if BOIDS % WORK_GROUP_SIZE == 0 { 
-                            BOIDS / WORK_GROUP_SIZE
-                        } else {
-                            BOIDS / WORK_GROUP_SIZE + 1
-                        },
+                        WORK_GROUPS,
                         1,
                         1,
                     );
@@ -422,6 +450,7 @@ async fn run() {
                     render_pass.draw(0..3, 0..BOIDS);
                 }
 
+                
                 queue.submit(std::iter::once(encoder.finish()));
                 output.present();
 
@@ -436,9 +465,14 @@ async fn run() {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
                 WindowEvent::Resized(size) => {
+                    if config.width == 0 && config.height == 0 {
+                        last_frame_time = instant.elapsed().as_secs_f32();
+                    }
+
                     config.width = size.width;
                     config.height = size.height;
                     if size.width > 0 && size.height > 0 {
+
                         surface.configure(&device, &config);
                         (depth_texture, depth_texture_view) = create_depth_texture(&device, size.width, size.height);
                         aspect_ratio = size.width as f32 / size.height as f32;
@@ -455,10 +489,20 @@ async fn run() {
                 }
                 _ => {}
             }
-            Event::MainEventsCleared => {     
-                if config.width > 0 && config.height > 0 {
-                    
+            Event::DeviceEvent {event, ..} => match event {
+                DeviceEvent::Key(KeyboardInput {
+                    virtual_keycode: Some(virtual_keycode),
+                    state,
+                    ..
+                }) => {
+                    input.set_key_pressed(virtual_keycode, state == ElementState::Pressed);
+                }
+                _ => {}
+            }
+            Event::MainEventsCleared => {
+                use VirtualKeyCode::*;
 
+                if config.width > 0 && config.height > 0 {
                     window.request_redraw();
                 }
             }

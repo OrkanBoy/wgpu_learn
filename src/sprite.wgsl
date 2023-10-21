@@ -17,7 +17,8 @@ fn vs_main(
     @location(2) boid_velocity: vec2<f32>,
 ) -> VertexOut {
     var out: VertexOut;
-    let orientation = normalize(boid_velocity);
+    let length = length(boid_velocity);
+    var orientation = normalize(boid_velocity);
     out.position.x = 
         orientation.x * vertex_position.x - orientation.y * vertex_position.y;
     out.position.y = 

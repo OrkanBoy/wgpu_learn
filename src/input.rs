@@ -10,8 +10,8 @@ pub struct InputState {
 impl InputState {
     pub fn new() -> Self {
         Self {
-            keys_pressed_bitmask: 0b0,
-            previous_keys_pressed_bitmask: 0b0,
+            keys_pressed_bitmask: 0,
+            previous_keys_pressed_bitmask: 0,
             delta_mouse_pos: [0.0, 0.0],
         }
     }
